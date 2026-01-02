@@ -3,12 +3,18 @@ Dataset loader for dual-view dog images.
 Supports both single-view and dual-view (frontal + lateral) images.
 """
 import os
+import sys
 from pathlib import Path
 from typing import Optional, Tuple, List
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 import numpy as np
+
+# Add project root to Python path if not already added
+project_root = Path(__file__).parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from src.preprocessing import get_train_transforms, get_val_transforms, get_test_transforms
 

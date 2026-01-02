@@ -2,6 +2,13 @@
 Training script for dual-view dog image matching model.
 """
 import os
+import sys
+from pathlib import Path
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 import argparse
 import torch
 import torch.nn as nn
@@ -9,7 +16,6 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import json
-from pathlib import Path
 
 from src.model import DualViewFusionModel, CombinedLoss, HardTripletLoss
 from src.utils import DualViewDataset, create_dataloaders
