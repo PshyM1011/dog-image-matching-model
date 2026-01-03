@@ -12,8 +12,9 @@ import faiss
 def compute_embeddings(
     model: torch.nn.Module,
     dataloader: torch.utils.data.DataLoader,
-    device: torch.device
-) -> Tuple[torch.Tensor, List[str]]:
+    device: torch.device,
+    return_paths: bool = False
+) -> Tuple[torch.Tensor, List[str], List[str]]:
     """
     Compute embeddings for all images in dataloader.
     
@@ -21,13 +22,15 @@ def compute_embeddings(
         model: Trained model
         dataloader: DataLoader
         device: Device to run on
+        return_paths: Whether to return image paths (for excluding self-matches)
         
     Returns:
-        (embeddings, dog_ids)
+        (embeddings, dog_ids) or (embeddings, dog_ids, paths) if return_paths=True
     """
     model.eval()
     embeddings = []
     dog_ids = []
+    paths = [] if return_paths else None
     
     with torch.no_grad():
         for batch in dataloader:
@@ -43,9 +46,21 @@ def compute_embeddings(
             
             embeddings.append(emb.cpu())
             dog_ids.extend(batch['dog_id'])
+            
+            if return_paths:
+                # Get paths (use frontal_path if available, otherwise image path)
+                if 'frontal_path' in batch:
+                    paths.extend(batch['frontal_path'])
+                elif 'path' in batch:
+                    paths.extend(batch['path'])
+                else:
+                    paths.extend([''] * len(batch['dog_id']))
     
     embeddings = torch.cat(embeddings, dim=0)
-    return embeddings, dog_ids
+    if return_paths:
+        return embeddings, dog_ids, paths
+    else:
+        return embeddings, dog_ids
 
 
 def cosine_similarity_search(
@@ -121,7 +136,9 @@ def compute_accuracy_at_k(
     query_ids: List[str],
     gallery_ids: List[str],
     top_indices: np.ndarray,
-    k_values: List[int] = [1, 5, 10]
+    k_values: List[int] = [1, 5, 10],
+    query_paths: List[str] = None,
+    gallery_paths: List[str] = None
 ) -> Dict[int, float]:
     """
     Compute accuracy@k metrics.
@@ -131,6 +148,8 @@ def compute_accuracy_at_k(
         gallery_ids: Gallery dog IDs
         top_indices: Top-k indices for each query [N_query, k]
         k_values: List of k values to compute
+        query_paths: Query image paths (optional, for excluding self-matches)
+        gallery_paths: Gallery image paths (optional, for excluding self-matches)
         
     Returns:
         Dictionary of {k: accuracy}
@@ -142,13 +161,41 @@ def compute_accuracy_at_k(
             continue
         
         correct = 0
+        total = 0
+        
         for i, query_id in enumerate(query_ids):
+            # Get top-k matches
+            top_k_indices = top_indices[i, :k]
+            top_k_ids = [gallery_ids[idx] for idx in top_k_indices]
+            
+            # FIX: Exclude self-matches if paths provided
+            if query_paths and gallery_paths:
+                # Check if any match is a self-match (same image path)
+                is_self_match = False
+                query_path = query_paths[i]
+                for idx in top_k_indices:
+                    if query_path == gallery_paths[idx]:
+                        is_self_match = True
+                        break
+                
+                # Skip self-matches in accuracy calculation
+                if is_self_match:
+                    # Remove self-match and check if correct dog is in remaining matches
+                    remaining_indices = [idx for idx in top_k_indices if query_path != gallery_paths[idx]]
+                    if remaining_indices:
+                        remaining_ids = [gallery_ids[idx] for idx in remaining_indices]
+                        if query_id in remaining_ids:
+                            correct += 1
+                    # If no remaining matches, count as incorrect
+                    total += 1
+                    continue
+            
             # Check if correct dog is in top-k
-            top_k_ids = [gallery_ids[idx] for idx in top_indices[i, :k]]
             if query_id in top_k_ids:
                 correct += 1
+            total += 1
         
-        accuracies[k] = correct / len(query_ids)
+        accuracies[k] = correct / total if total > 0 else 0.0
     
     return accuracies
 
@@ -210,9 +257,9 @@ def evaluate_model(
     Returns:
         Evaluation metrics dictionary
     """
-    # Compute embeddings
-    query_embeddings, query_ids = compute_embeddings(model, query_loader, device)
-    gallery_embeddings, gallery_ids = compute_embeddings(model, gallery_loader, device)
+    # Compute embeddings (with paths for self-match exclusion)
+    query_embeddings, query_ids, query_paths = compute_embeddings(model, query_loader, device, return_paths=True)
+    gallery_embeddings, gallery_ids, gallery_paths = compute_embeddings(model, gallery_loader, device, return_paths=True)
     
     # Convert to numpy for FAISS
     query_emb_np = query_embeddings.numpy()
@@ -234,14 +281,23 @@ def evaluate_model(
         similarities = np.array(similarities_list)
         indices = np.array(indices_list)
     
-    # Compute accuracy metrics
-    accuracies = compute_accuracy_at_k(query_ids, gallery_ids, indices, k_values=[1, 5, 10])
+    # Compute accuracy metrics (FIX: exclude self-matches)
+    accuracies = compute_accuracy_at_k(
+        query_ids, gallery_ids, indices, 
+        k_values=[1, 5, 10],
+        query_paths=query_paths,
+        gallery_paths=gallery_paths
+    )
     
-    return {
+    result = {
         'accuracies': accuracies,
         'similarities': similarities,
         'indices': indices,
         'query_ids': query_ids,
         'gallery_ids': gallery_ids
     }
+    if query_paths is not None:
+        result['query_paths'] = query_paths
+        result['gallery_paths'] = gallery_paths
+    return result
 

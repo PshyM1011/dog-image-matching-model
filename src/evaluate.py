@@ -53,11 +53,16 @@ def main():
     # Create dataloaders
     print('Loading datasets...')
     test_dir = os.path.join(args.data_dir, 'test')
+    val_dir = os.path.join(args.data_dir, 'val')
     
-    # For evaluation, we need query and gallery sets
-    # For simplicity, using test set as both (in practice, split appropriately)
+    # FIX: Use different sets for query and gallery to avoid self-matches
+    # Query: test set, Gallery: validation set (or vice versa)
+    # This ensures no self-matches and realistic evaluation
+    print('Using test set as queries and validation set as gallery...')
     query_dataset = DualViewDataset(test_dir, transform=get_test_transforms())
-    gallery_dataset = DualViewDataset(test_dir, transform=get_test_transforms())
+    gallery_dataset = DualViewDataset(val_dir, transform=get_test_transforms())
+    
+    print(f'Note: Query and gallery are different sets to avoid self-matches')
     
     query_loader = DataLoader(
         query_dataset,

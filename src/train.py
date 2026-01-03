@@ -28,12 +28,14 @@ def train_epoch(
     criterion: nn.Module,
     optimizer: optim.Optimizer,
     device: torch.device,
-    epoch: int
+    epoch: int,
+    id_to_label: dict
 ) -> dict:
     """Train for one epoch."""
     model.train()
     running_loss = 0.0
     num_batches = 0
+    skipped_batches = 0
     
     pbar = tqdm(dataloader, desc=f'Epoch {epoch}')
     
@@ -45,33 +47,49 @@ def train_epoch(
         # Forward pass
         embeddings = model(frontal, lateral)
         
-        # Create labels (convert dog_id strings to integers)
-        unique_ids = list(set(dog_ids))
-        id_to_label = {dog_id: idx for idx, dog_id in enumerate(unique_ids)}
-        labels = torch.tensor([id_to_label[dog_id] for dog_id in dog_ids], device=device)
-        
-        # Compute loss
-        if isinstance(criterion, CombinedLoss):
-            loss, loss_dict = criterion(embeddings, labels)
-        elif isinstance(criterion, HardTripletLoss):
-            loss = criterion(embeddings, labels)
-            loss_dict = {'total': loss, 'triplet': loss}
+        # Create labels using GLOBAL mapping (FIX: consistent labels)
+        labels = []
+        for dog_id in dog_ids:
+            if dog_id in id_to_label:
+                labels.append(id_to_label[dog_id])
+            else:
+                # If dog_id not in training set, skip this batch
+                skipped_batches += 1
+                break
         else:
-            # For other losses, need anchor/positive/negative
-            # This is simplified - in practice, you'd generate triplets
-            loss = torch.tensor(0.0, device=device, requires_grad=True)
-            loss_dict = {'total': loss}
-        
-        # Backward pass
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        running_loss += loss.item()
-        num_batches += 1
-        
-        # Update progress bar
-        pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+            # All dog_ids found, create tensor
+            labels = torch.tensor(labels, device=device, dtype=torch.long)
+            
+            # Check if batch has at least 2 different classes (needed for triplet loss)
+            unique_labels = torch.unique(labels)
+            if len(unique_labels) < 2:
+                # Skip batches with only one class (can't compute triplet loss)
+                skipped_batches += 1
+                continue
+            
+            # Compute loss
+            if isinstance(criterion, CombinedLoss):
+                loss, loss_dict = criterion(embeddings, labels)
+            elif isinstance(criterion, HardTripletLoss):
+                loss = criterion(embeddings, labels)
+                loss_dict = {'total': loss, 'triplet': loss}
+            else:
+                loss = torch.tensor(0.0, device=device, requires_grad=True)
+                loss_dict = {'total': loss}
+            
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            running_loss += loss.item()
+            num_batches += 1
+            
+            # Update progress bar
+            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+    
+    if skipped_batches > 0:
+        print(f'  Skipped {skipped_batches} batches (single class or unknown dog_id)')
     
     avg_loss = running_loss / num_batches if num_batches > 0 else 0.0
     return {'loss': avg_loss}
@@ -81,12 +99,14 @@ def validate(
     model: nn.Module,
     dataloader: DataLoader,
     criterion: nn.Module,
-    device: torch.device
+    device: torch.device,
+    id_to_label: dict
 ) -> dict:
     """Validate model."""
     model.eval()
     running_loss = 0.0
     num_batches = 0
+    skipped_batches = 0
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc='Validating'):
@@ -96,20 +116,37 @@ def validate(
             
             embeddings = model(frontal, lateral)
             
-            # Create labels
-            unique_ids = list(set(dog_ids))
-            id_to_label = {dog_id: idx for idx, dog_id in enumerate(unique_ids)}
-            labels = torch.tensor([id_to_label[dog_id] for dog_id in dog_ids], device=device)
-            
-            if isinstance(criterion, CombinedLoss):
-                loss, loss_dict = criterion(embeddings, labels)
-            elif isinstance(criterion, HardTripletLoss):
-                loss = criterion(embeddings, labels)
+            # Create labels using GLOBAL mapping (FIX: consistent labels)
+            labels = []
+            for dog_id in dog_ids:
+                if dog_id in id_to_label:
+                    labels.append(id_to_label[dog_id])
+                else:
+                    # If dog_id not in training set, skip this batch
+                    skipped_batches += 1
+                    break
             else:
-                loss = torch.tensor(0.0, device=device)
-            
-            running_loss += loss.item()
-            num_batches += 1
+                # All dog_ids found, create tensor
+                labels = torch.tensor(labels, device=device, dtype=torch.long)
+                
+                # Check if batch has at least 2 different classes
+                unique_labels = torch.unique(labels)
+                if len(unique_labels) < 2:
+                    skipped_batches += 1
+                    continue
+                
+                if isinstance(criterion, CombinedLoss):
+                    loss, loss_dict = criterion(embeddings, labels)
+                elif isinstance(criterion, HardTripletLoss):
+                    loss = criterion(embeddings, labels)
+                else:
+                    loss = torch.tensor(0.0, device=device)
+                
+                running_loss += loss.item()
+                num_batches += 1
+    
+    if skipped_batches > 0:
+        print(f'  Skipped {skipped_batches} validation batches (single class or unknown dog_id)')
     
     avg_loss = running_loss / num_batches if num_batches > 0 else 0.0
     return {'loss': avg_loss}
@@ -149,6 +186,19 @@ def main():
     print(f'Train samples: {len(train_loader.dataset)}')
     print(f'Val samples: {len(val_loader.dataset)}')
     
+    # Create global label mapping (FIX: consistent labels across all batches)
+    print('Creating label mapping...')
+    all_train_dog_ids = set()
+    for sample in train_loader.dataset.samples:
+        all_train_dog_ids.add(sample['dog_id'])
+    
+    all_train_dog_ids = sorted(list(all_train_dog_ids))
+    global_id_to_label = {dog_id: idx for idx, dog_id in enumerate(all_train_dog_ids)}
+    num_classes = len(all_train_dog_ids)
+    
+    print(f'Found {num_classes} unique dogs in training set')
+    print(f'Label mapping: {dict(list(global_id_to_label.items())[:5])}...')  # Show first 5
+    
     # Create model
     print('Creating model...')
     model = DualViewFusionModel(embedding_dim=args.embedding_dim).to(device)
@@ -159,9 +209,7 @@ def main():
     
     # Create loss function
     if args.use_combined_loss:
-        # Need to know number of unique dogs for ArcFace
-        # For now, use a large number (will be adjusted during training)
-        num_classes = 1000  # Adjust based on your dataset
+        # Use actual number of classes from dataset
         criterion = CombinedLoss(
             embedding_dim=args.embedding_dim,
             num_classes=num_classes
@@ -193,11 +241,11 @@ def main():
         print(f'\nEpoch {epoch+1}/{args.epochs}')
         
         # Train
-        train_metrics = train_epoch(model, train_loader, criterion, optimizer, device, epoch)
+        train_metrics = train_epoch(model, train_loader, criterion, optimizer, device, epoch, global_id_to_label)
         history['train_loss'].append(train_metrics['loss'])
         
         # Validate
-        val_metrics = validate(model, val_loader, criterion, device)
+        val_metrics = validate(model, val_loader, criterion, device, global_id_to_label)
         history['val_loss'].append(val_metrics['loss'])
         
         # Update learning rate
