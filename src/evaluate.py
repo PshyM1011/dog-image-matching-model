@@ -91,14 +91,55 @@ def main():
         use_faiss=args.use_faiss
     )
     
-    # Print results
-    print('\n' + '='*50)
+    # Print results with detailed explanations
+    print('\n' + '='*70)
     print('EVALUATION RESULTS')
-    print('='*50)
-    print(f'Accuracy@1:  {results["accuracies"].get(1, 0):.4f}')
-    print(f'Accuracy@5:  {results["accuracies"].get(5, 0):.4f}')
-    print(f'Accuracy@10: {results["accuracies"].get(10, 0):.4f}')
-    print('='*50)
+    print('='*70)
+    
+    num_queries = len(results['query_ids'])
+    accuracy_counts = results.get('accuracy_counts', {})
+    
+    print(f'\nTotal Queries: {num_queries}')
+    print(f'Total Gallery Samples: {len(results["gallery_ids"])}')
+    print('\n' + '-'*70)
+    
+    # Accuracy@1
+    acc1 = results["accuracies"].get(1, 0)
+    if 1 in accuracy_counts:
+        correct1, total1 = accuracy_counts[1]
+        print('\n📊 Accuracy@1:')
+        print('   Definition: Percentage of queries where the top match is correct.')
+        print(f'   Calculation: Out of {total1} queries, the correct match is the top result for {correct1} queries.')
+        print(f'   Accuracy@1 = ({correct1} / {total1}) × 100 = {acc1 * 100:.2f}%')
+        print(f'   Value: {acc1:.4f} ({acc1 * 100:.2f}%)')
+    else:
+        print(f'\n📊 Accuracy@1: {acc1:.4f} ({acc1 * 100:.2f}%)')
+    
+    # Accuracy@5
+    acc5 = results["accuracies"].get(5, 0)
+    if 5 in accuracy_counts:
+        correct5, total5 = accuracy_counts[5]
+        print('\n📊 Accuracy@5:')
+        print('   Definition: Percentage of queries where the correct match is in the top 5.')
+        print(f'   Calculation: Out of {total5} queries, the correct match is in the top 5 for {correct5} queries.')
+        print(f'   Accuracy@5 = ({correct5} / {total5}) × 100 = {acc5 * 100:.2f}%')
+        print(f'   Value: {acc5:.4f} ({acc5 * 100:.2f}%)')
+    else:
+        print(f'\n📊 Accuracy@5: {acc5:.4f} ({acc5 * 100:.2f}%)')
+    
+    # Accuracy@10
+    acc10 = results["accuracies"].get(10, 0)
+    if 10 in accuracy_counts:
+        correct10, total10 = accuracy_counts[10]
+        print('\n📊 Accuracy@10:')
+        print('   Definition: Percentage of queries where the correct match is in the top 10.')
+        print(f'   Calculation: Out of {total10} queries, the correct match is in the top 10 for {correct10} queries.')
+        print(f'   Accuracy@10 = ({correct10} / {total10}) × 100 = {acc10 * 100:.2f}%')
+        print(f'   Value: {acc10:.4f} ({acc10 * 100:.2f}%)')
+    else:
+        print(f'\n📊 Accuracy@10: {acc10:.4f} ({acc10 * 100:.2f}%)')
+    
+    print('\n' + '='*70)
     
     # Save results
     import json

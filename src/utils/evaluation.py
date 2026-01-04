@@ -168,9 +168,10 @@ def compute_accuracy_at_k(
         gallery_paths: Gallery image paths (optional, for excluding self-matches)
         
     Returns:
-        Dictionary of {k: accuracy}
+        Dictionary of {k: accuracy} and optionally {k: (correct, total)} counts
     """
     accuracies = {}
+    accuracy_counts = {}  # Store (correct, total) for each k
     
     for k in k_values:
         if k > top_indices.shape[1]:
@@ -208,8 +209,9 @@ def compute_accuracy_at_k(
                 total += 1
         
         accuracies[k] = correct / total if total > 0 else 0.0
+        accuracy_counts[k] = (correct, total)
     
-    return accuracies
+    return accuracies, accuracy_counts
 
 
 def re_rank_results(
@@ -321,7 +323,7 @@ def evaluate_model(
     
     # Compute accuracy metrics (FIX: exclude self-matches)
     print('Computing accuracy metrics...')
-    accuracies = compute_accuracy_at_k(
+    accuracies, accuracy_counts = compute_accuracy_at_k(
         query_ids, gallery_ids, indices, 
         k_values=[1, 5, 10],
         query_paths=query_paths,
@@ -330,6 +332,7 @@ def evaluate_model(
     
     result = {
         'accuracies': accuracies,
+        'accuracy_counts': accuracy_counts,  # Add counts for detailed output
         'similarities': similarities,
         'indices': indices,
         'query_ids': query_ids,
