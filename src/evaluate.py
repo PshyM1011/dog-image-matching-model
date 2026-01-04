@@ -53,16 +53,15 @@ def main():
     # Create dataloaders
     print('Loading datasets...')
     test_dir = os.path.join(args.data_dir, 'test')
-    val_dir = os.path.join(args.data_dir, 'val')
+    train_dir = os.path.join(args.data_dir, 'train')
     
-    # FIX: Use different sets for query and gallery to avoid self-matches
-    # Query: test set, Gallery: validation set (or vice versa)
-    # This ensures no self-matches and realistic evaluation
-    print('Using test set as queries and validation set as gallery...')
+    # Use test set as queries and train set as gallery
+    # This ensures there are multiple images per dog in the gallery to match against
+    # Self-matches are automatically avoided since query and gallery are different sets
+    print('Using test set as queries and train set as gallery...')
+    print('Note: This ensures multiple images per dog in gallery for proper evaluation')
     query_dataset = DualViewDataset(test_dir, transform=get_test_transforms())
-    gallery_dataset = DualViewDataset(val_dir, transform=get_test_transforms())
-    
-    print(f'Note: Query and gallery are different sets to avoid self-matches')
+    gallery_dataset = DualViewDataset(train_dir, transform=get_test_transforms())
     
     query_loader = DataLoader(
         query_dataset,

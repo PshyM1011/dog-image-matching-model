@@ -70,9 +70,20 @@ def train_epoch(
             # Compute loss
             if isinstance(criterion, CombinedLoss):
                 loss, loss_dict = criterion(embeddings, labels)
+                # Debug: print loss components occasionally
+                if batch_idx == 0 and epoch % 5 == 0:
+                    print(f'\n  Loss components - Triplet: {loss_dict["triplet"]:.4f}, ArcFace: {loss_dict["arcface"]:.4f}')
             elif isinstance(criterion, HardTripletLoss):
                 loss = criterion(embeddings, labels)
                 loss_dict = {'total': loss, 'triplet': loss}
+                # Debug: print detailed info for first batch of each epoch
+                if batch_idx == 0:
+                    # Check embedding statistics
+                    emb_norm = embeddings.norm(p=2, dim=1).mean().item()
+                    emb_std = embeddings.std().item()
+                    unique_labels_count = len(torch.unique(labels))
+                    if epoch == 0 or epoch % 5 == 0:
+                        print(f'\n  Epoch {epoch} - Embedding norm: {emb_norm:.4f}, std: {emb_std:.4f}, unique labels: {unique_labels_count}, loss: {loss.item():.6f}')
             else:
                 loss = torch.tensor(0.0, device=device, requires_grad=True)
                 loss_dict = {'total': loss}
@@ -210,12 +221,18 @@ def main():
     # Create loss function
     if args.use_combined_loss:
         # Use actual number of classes from dataset
+        # Reduce ArcFace scale to prevent very high loss
         criterion = CombinedLoss(
             embedding_dim=args.embedding_dim,
-            num_classes=num_classes
+            num_classes=num_classes,
+            arcface_scale=32.0,  # Reduced from 64.0 to prevent very high loss
+            triplet_weight=0.7,  # Give more weight to triplet loss
+            arcface_weight=0.3   # Less weight to ArcFace
         ).to(device)
+        print(f'Using CombinedLoss: Triplet (70%) + ArcFace (30%)')
     else:
-        criterion = HardTripletLoss(margin=1.0).to(device)
+        criterion = HardTripletLoss(margin=1.0, distance_metric='cosine').to(device)
+        print(f'Using HardTripletLoss with cosine distance')
     
     # Create optimizer
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)

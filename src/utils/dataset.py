@@ -187,9 +187,10 @@ class DualViewDataset(Dataset):
             
             # Create pairs
             if frontal_images and lateral_images:
-                # Pair each frontal with each lateral (or use first of each)
-                for front_path in frontal_images[:1]:  # Use first frontal
-                    for side_path in lateral_images[:1]:  # Use first lateral
+                # Create ALL possible pairs (not just first of each)
+                # This allows multiple samples per dog for better evaluation
+                for front_path in frontal_images:
+                    for side_path in lateral_images:
                         samples.append({
                             'frontal_path': front_path,
                             'lateral_path': side_path,

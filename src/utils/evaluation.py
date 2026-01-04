@@ -2,18 +2,26 @@
 Evaluation utilities for dog image matching.
 Includes similarity search, re-ranking, and accuracy metrics.
 """
+import os
 import torch
 import numpy as np
 from typing import List, Tuple, Dict
 from sklearn.metrics.pairwise import cosine_similarity
-import faiss
+
+# FAISS is optional - will fall back to cosine similarity if not available
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
 
 
 def compute_embeddings(
     model: torch.nn.Module,
     dataloader: torch.utils.data.DataLoader,
     device: torch.device,
-    return_paths: bool = False
+    return_paths: bool = False,
+    dataset_name: str = "dataset"
 ) -> Tuple[torch.Tensor, List[str], List[str]]:
     """
     Compute embeddings for all images in dataloader.
@@ -23,6 +31,7 @@ def compute_embeddings(
         dataloader: DataLoader
         device: Device to run on
         return_paths: Whether to return image paths (for excluding self-matches)
+        dataset_name: Name of dataset for progress display
         
     Returns:
         (embeddings, dog_ids) or (embeddings, dog_ids, paths) if return_paths=True
@@ -32,8 +41,14 @@ def compute_embeddings(
     dog_ids = []
     paths = [] if return_paths else None
     
+    total_batches = len(dataloader)
+    print(f'  Computing embeddings for {dataset_name} ({total_batches} batches)...')
+    
     with torch.no_grad():
-        for batch in dataloader:
+        for batch_idx, batch in enumerate(dataloader):
+            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == total_batches:
+                print(f'  Progress: {batch_idx + 1}/{total_batches} batches processed', end='\r')
+            
             if 'frontal' in batch and 'lateral' in batch:
                 # Dual-view model
                 frontal = batch['frontal'].to(device)
@@ -56,6 +71,7 @@ def compute_embeddings(
                 else:
                     paths.extend([''] * len(batch['dog_id']))
     
+    print(f'  Completed: {total_batches}/{total_batches} batches processed')
     embeddings = torch.cat(embeddings, dim=0)
     if return_paths:
         return embeddings, dog_ids, paths
@@ -166,34 +182,30 @@ def compute_accuracy_at_k(
         for i, query_id in enumerate(query_ids):
             # Get top-k matches
             top_k_indices = top_indices[i, :k]
-            top_k_ids = [gallery_ids[idx] for idx in top_k_indices]
             
-            # FIX: Exclude self-matches if paths provided
+            # Exclude self-matches if paths provided
             if query_paths and gallery_paths:
-                # Check if any match is a self-match (same image path)
-                is_self_match = False
-                query_path = query_paths[i]
-                for idx in top_k_indices:
-                    if query_path == gallery_paths[idx]:
-                        is_self_match = True
-                        break
+                query_path = os.path.normpath(query_paths[i])
+                # Filter out self-matches (same image path, normalized for comparison)
+                valid_indices = [idx for idx in top_k_indices 
+                               if query_path != os.path.normpath(gallery_paths[idx])]
                 
-                # Skip self-matches in accuracy calculation
-                if is_self_match:
-                    # Remove self-match and check if correct dog is in remaining matches
-                    remaining_indices = [idx for idx in top_k_indices if query_path != gallery_paths[idx]]
-                    if remaining_indices:
-                        remaining_ids = [gallery_ids[idx] for idx in remaining_indices]
-                        if query_id in remaining_ids:
-                            correct += 1
-                    # If no remaining matches, count as incorrect
+                if len(valid_indices) == 0:
+                    # All matches were self-matches, count as incorrect
                     total += 1
                     continue
-            
-            # Check if correct dog is in top-k
-            if query_id in top_k_ids:
-                correct += 1
-            total += 1
+                
+                # Check if correct dog is in remaining (non-self) matches
+                valid_ids = [gallery_ids[idx] for idx in valid_indices]
+                if query_id in valid_ids:
+                    correct += 1
+                total += 1
+            else:
+                # No path information, use original logic (may include self-matches)
+                top_k_ids = [gallery_ids[idx] for idx in top_k_indices]
+                if query_id in top_k_ids:
+                    correct += 1
+                total += 1
         
         accuracies[k] = correct / total if total > 0 else 0.0
     
@@ -258,30 +270,57 @@ def evaluate_model(
         Evaluation metrics dictionary
     """
     # Compute embeddings (with paths for self-match exclusion)
-    query_embeddings, query_ids, query_paths = compute_embeddings(model, query_loader, device, return_paths=True)
-    gallery_embeddings, gallery_ids, gallery_paths = compute_embeddings(model, gallery_loader, device, return_paths=True)
+    print('Computing query embeddings...')
+    query_embeddings, query_ids, query_paths = compute_embeddings(
+        model, query_loader, device, return_paths=True, dataset_name="queries"
+    )
+    
+    print('Computing gallery embeddings...')
+    gallery_embeddings, gallery_ids, gallery_paths = compute_embeddings(
+        model, gallery_loader, device, return_paths=True, dataset_name="gallery"
+    )
+    
+    print(f'Query embeddings shape: {query_embeddings.shape}')
+    print(f'Gallery embeddings shape: {gallery_embeddings.shape}')
     
     # Convert to numpy for FAISS
+    print('Converting to numpy...')
     query_emb_np = query_embeddings.numpy()
     gallery_emb_np = gallery_embeddings.numpy()
     
     # Search
-    if use_faiss:
-        distances, indices = faiss_search(query_emb_np, gallery_emb_np, top_k=top_k)
-        # Convert distances to similarities (FAISS returns inner product for normalized vectors)
-        similarities = distances
-    else:
+    print(f'Searching for top-{top_k} matches...')
+    if use_faiss and FAISS_AVAILABLE:
+        try:
+            distances, indices = faiss_search(query_emb_np, gallery_emb_np, top_k=top_k)
+            # Convert distances to similarities (FAISS returns inner product for normalized vectors)
+            similarities = distances
+            print('Search completed using FAISS')
+        except Exception as e:
+            print(f'FAISS search failed: {e}')
+            print('Falling back to cosine similarity search...')
+            use_faiss = False
+    elif use_faiss and not FAISS_AVAILABLE:
+        print('FAISS not available, using cosine similarity search...')
+        use_faiss = False
+    
+    if not use_faiss:
         # Use cosine similarity
+        print('Using cosine similarity search (this may take a while for large galleries)...')
         similarities_list = []
         indices_list = []
         for i in range(len(query_embeddings)):
+            if (i + 1) % 10 == 0 or (i + 1) == len(query_embeddings):
+                print(f'  Progress: {i + 1}/{len(query_embeddings)} queries processed', end='\r')
             sim, idx = cosine_similarity_search(query_embeddings[i], gallery_embeddings, top_k)
             similarities_list.append(sim.numpy())
             indices_list.append(idx.numpy())
+        print(f'  Completed: {len(query_embeddings)}/{len(query_embeddings)} queries processed')
         similarities = np.array(similarities_list)
         indices = np.array(indices_list)
     
     # Compute accuracy metrics (FIX: exclude self-matches)
+    print('Computing accuracy metrics...')
     accuracies = compute_accuracy_at_k(
         query_ids, gallery_ids, indices, 
         k_values=[1, 5, 10],
