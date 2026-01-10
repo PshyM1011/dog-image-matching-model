@@ -1,0 +1,159 @@
+"""
+Evaluation script for dual-view dog image matching model.
+"""
+import os
+import sys
+from pathlib import Path
+
+# Add project root to Python path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+import argparse
+import torch
+from torch.utils.data import DataLoader
+
+from src.model import DualViewFusionModel
+from src.utils import DualViewDataset, create_dataloaders
+from src.utils.evaluation import evaluate_model
+from src.preprocessing import get_test_transforms
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Evaluate dual-view dog image matching model')
+    parser.add_argument('--checkpoint', type=str, required=True, help='Path to model checkpoint')
+    parser.add_argument('--data_dir', type=str, default='data', help='Root data directory')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--top_k', type=int, default=10, help='Top-k for retrieval')
+    parser.add_argument('--num_workers', type=int, default=4, help='Number of data loader workers')
+    parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu', help='Device')
+    parser.add_argument('--use_faiss', action='store_true', help='Use FAISS for fast search')
+    
+    args = parser.parse_args()
+    
+    # Device
+    device = torch.device(args.device)
+    print(f'Using device: {device}')
+    
+    # Load checkpoint
+    print(f'Loading checkpoint from {args.checkpoint}...')
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    
+    # Get model args
+    model_args = checkpoint.get('args', {})
+    embedding_dim = model_args.get('embedding_dim', 512)
+    
+    # Create model
+    model = DualViewFusionModel(embedding_dim=embedding_dim).to(device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    
+    print('Model loaded successfully!')
+    
+    # Create dataloaders
+    print('Loading datasets...')
+    test_dir = os.path.join(args.data_dir, 'test')
+    train_dir = os.path.join(args.data_dir, 'train')
+    
+    # Use test set as queries and train set as gallery
+    # This ensures there are multiple images per dog in the gallery to match against
+    # Self-matches are automatically avoided since query and gallery are different sets
+    print('Using test set as queries and train set as gallery...')
+    print('Note: This ensures multiple images per dog in gallery for proper evaluation')
+    query_dataset = DualViewDataset(test_dir, transform=get_test_transforms())
+    gallery_dataset = DualViewDataset(train_dir, transform=get_test_transforms())
+    
+    query_loader = DataLoader(
+        query_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers
+    )
+    
+    gallery_loader = DataLoader(
+        gallery_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers
+    )
+    
+    print(f'Query samples: {len(query_dataset)}')
+    print(f'Gallery samples: {len(gallery_dataset)}')
+    
+    # Evaluate
+    print('Evaluating model...')
+    results = evaluate_model(
+        model,
+        query_loader,
+        gallery_loader,
+        device,
+        top_k=args.top_k,
+        use_faiss=args.use_faiss
+    )
+    
+    # Print results with detailed explanations
+    print('\n' + '='*70)
+    print('EVALUATION RESULTS')
+    print('='*70)
+    
+    num_queries = len(results['query_ids'])
+    accuracy_counts = results.get('accuracy_counts', {})
+    
+    print(f'\nTotal Queries: {num_queries}')
+    print(f'Total Gallery Samples: {len(results["gallery_ids"])}')
+    print('\n' + '-'*70)
+    
+    # Accuracy@1
+    acc1 = results["accuracies"].get(1, 0)
+    if 1 in accuracy_counts:
+        correct1, total1 = accuracy_counts[1]
+        print('\n📊 Accuracy@1:')
+        print('   Definition: Percentage of queries where the top match is correct.')
+        print(f'   Calculation: Out of {total1} queries, the correct match is the top result for {correct1} queries.')
+        print(f'   Accuracy@1 = ({correct1} / {total1}) × 100 = {acc1 * 100:.2f}%')
+        print(f'   Value: {acc1:.4f} ({acc1 * 100:.2f}%)')
+    else:
+        print(f'\n📊 Accuracy@1: {acc1:.4f} ({acc1 * 100:.2f}%)')
+    
+    # Accuracy@5
+    acc5 = results["accuracies"].get(5, 0)
+    if 5 in accuracy_counts:
+        correct5, total5 = accuracy_counts[5]
+        print('\n📊 Accuracy@5:')
+        print('   Definition: Percentage of queries where the correct match is in the top 5.')
+        print(f'   Calculation: Out of {total5} queries, the correct match is in the top 5 for {correct5} queries.')
+        print(f'   Accuracy@5 = ({correct5} / {total5}) × 100 = {acc5 * 100:.2f}%')
+        print(f'   Value: {acc5:.4f} ({acc5 * 100:.2f}%)')
+    else:
+        print(f'\n📊 Accuracy@5: {acc5:.4f} ({acc5 * 100:.2f}%)')
+    
+    # Accuracy@10
+    acc10 = results["accuracies"].get(10, 0)
+    if 10 in accuracy_counts:
+        correct10, total10 = accuracy_counts[10]
+        print('\n📊 Accuracy@10:')
+        print('   Definition: Percentage of queries where the correct match is in the top 10.')
+        print(f'   Calculation: Out of {total10} queries, the correct match is in the top 10 for {correct10} queries.')
+        print(f'   Accuracy@10 = ({correct10} / {total10}) × 100 = {acc10 * 100:.2f}%')
+        print(f'   Value: {acc10:.4f} ({acc10 * 100:.2f}%)')
+    else:
+        print(f'\n📊 Accuracy@10: {acc10:.4f} ({acc10 * 100:.2f}%)')
+    
+    print('\n' + '='*70)
+    
+    # Save results
+    import json
+    output_file = 'evaluation_results.json'
+    with open(output_file, 'w') as f:
+        json.dump({
+            'accuracies': results['accuracies'],
+            'num_queries': len(results['query_ids']),
+            'num_gallery': len(results['gallery_ids'])
+        }, f, indent=2)
+    
+    print(f'\nResults saved to {output_file}')
+
+
+if __name__ == '__main__':
+    main()
+
