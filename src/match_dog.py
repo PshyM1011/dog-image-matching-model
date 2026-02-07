@@ -77,10 +77,14 @@ def load_or_compute_gallery_embeddings(
     data_dir: str,
     device: torch.device,
     gallery_embeddings_path: str = None,
-    batch_size: int = 32
+    batch_size: int = 32,
+    checkpoint_path: str = None,
+    force_recompute: bool = False
 ):
     """
     Load pre-computed gallery embeddings or compute them from train set.
+    
+    Automatically recomputes if checkpoint is newer than saved embeddings.
     
     Args:
         model: Trained model
@@ -88,6 +92,8 @@ def load_or_compute_gallery_embeddings(
         device: Device to run on
         gallery_embeddings_path: Path to save/load embeddings
         batch_size: Batch size for computing embeddings
+        checkpoint_path: Path to checkpoint file (to check if embeddings are outdated)
+        force_recompute: Force recomputation even if embeddings exist
         
     Returns:
         (gallery_embeddings, gallery_ids)
@@ -96,14 +102,62 @@ def load_or_compute_gallery_embeddings(
     if gallery_embeddings_path is None:
         gallery_embeddings_path = 'gallery_embeddings.pt'
     
-    # Try to load pre-computed embeddings
-    if os.path.exists(gallery_embeddings_path):
+    # Check if we should recompute
+    should_recompute = force_recompute
+    
+    if not should_recompute and os.path.exists(gallery_embeddings_path) and checkpoint_path:
+        # Check if checkpoint is newer than gallery embeddings
+        try:
+            checkpoint_mtime = os.path.getmtime(checkpoint_path)
+            gallery_mtime = os.path.getmtime(gallery_embeddings_path)
+            
+            if checkpoint_mtime > gallery_mtime:
+                from datetime import datetime
+                checkpoint_time = datetime.fromtimestamp(checkpoint_mtime).strftime('%Y-%m-%d %H:%M:%S')
+                gallery_time = datetime.fromtimestamp(gallery_mtime).strftime('%Y-%m-%d %H:%M:%S')
+                
+                print(f'⚠️  Checkpoint is newer than gallery embeddings!')
+                print(f'   Checkpoint modified: {checkpoint_time}')
+                print(f'   Gallery embeddings modified: {gallery_time}')
+                print(f'   Recomputing gallery embeddings to match current model...')
+                should_recompute = True
+        except Exception as e:
+            print(f'⚠️  Could not compare file timestamps: {e}')
+            print(f'   Recomputing gallery embeddings to be safe...')
+            should_recompute = True
+    
+    # Try to load pre-computed embeddings (if not forcing recompute)
+    if not should_recompute and os.path.exists(gallery_embeddings_path):
         print(f'Loading pre-computed gallery embeddings from {gallery_embeddings_path}...')
-        data = torch.load(gallery_embeddings_path, map_location=device)
-        gallery_embeddings = data['embeddings']
-        gallery_ids = data['ids']
-        print(f'Loaded {len(gallery_ids)} gallery embeddings')
-        return gallery_embeddings, gallery_ids
+        try:
+            data = torch.load(gallery_embeddings_path, map_location=device)
+            gallery_embeddings = data['embeddings']
+            gallery_ids = data['ids']
+            
+            # Check if saved embeddings match the current checkpoint
+            if checkpoint_path and 'checkpoint_path' in data:
+                saved_checkpoint = data.get('checkpoint_path', '')
+                if saved_checkpoint != checkpoint_path:
+                    print(f'⚠️  Saved embeddings were computed with different checkpoint!')
+                    print(f'   Saved checkpoint: {saved_checkpoint}')
+                    print(f'   Current checkpoint: {checkpoint_path}')
+                    print(f'   Recomputing gallery embeddings for current checkpoint...')
+                    should_recompute = True
+                elif 'checkpoint_mtime' in data and os.path.exists(checkpoint_path):
+                    saved_mtime = data.get('checkpoint_mtime', 0)
+                    current_mtime = os.path.getmtime(checkpoint_path)
+                    if current_mtime > saved_mtime:
+                        print(f'⚠️  Current checkpoint is newer than when embeddings were computed!')
+                        print(f'   Recomputing gallery embeddings...')
+                        should_recompute = True
+            
+            if not should_recompute:
+                print(f'✅ Loaded {len(gallery_ids)} gallery embeddings')
+                return gallery_embeddings, gallery_ids
+        except Exception as e:
+            print(f'⚠️  Error loading gallery embeddings: {e}')
+            print(f'   Recomputing gallery embeddings...')
+            should_recompute = True
     
     # Compute embeddings from train set
     print('Computing gallery embeddings from train set...')
@@ -128,10 +182,17 @@ def load_or_compute_gallery_embeddings(
     
     # Save embeddings for future use
     print(f'Saving gallery embeddings to {gallery_embeddings_path}...')
-    torch.save({
+    save_data = {
         'embeddings': gallery_embeddings,
         'ids': gallery_ids
-    }, gallery_embeddings_path)
+    }
+    
+    # Store checkpoint metadata if available
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        save_data['checkpoint_path'] = checkpoint_path
+        save_data['checkpoint_mtime'] = os.path.getmtime(checkpoint_path)
+    
+    torch.save(save_data, gallery_embeddings_path)
     
     print(f'Saved {len(gallery_ids)} gallery embeddings')
     return gallery_embeddings, gallery_ids
@@ -310,6 +371,11 @@ Examples:
         default=32,
         help='Batch size for computing gallery embeddings (default: 32)'
     )
+    parser.add_argument(
+        '--recompute_gallery',
+        action='store_true',
+        help='Force recomputation of gallery embeddings (ignores saved file)'
+    )
     
     args = parser.parse_args()
     
@@ -328,7 +394,9 @@ Examples:
         args.data_dir,
         device,
         args.gallery_embeddings,
-        args.batch_size
+        args.batch_size,
+        checkpoint_path=args.checkpoint,  # Pass checkpoint path to check timestamps
+        force_recompute=args.recompute_gallery  # Allow forcing recomputation
     )
     print()
     
