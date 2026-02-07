@@ -18,7 +18,7 @@ from tqdm import tqdm
 import json
 
 from src.model import DualViewFusionModel, CombinedLoss, HardTripletLoss
-from src.utils import DualViewDataset, create_dataloaders
+from src.utils import DualViewDataset
 from src.preprocessing import get_train_transforms, get_val_transforms
 
 
@@ -175,6 +175,11 @@ def main():
     parser.add_argument('--save_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     parser.add_argument('--use_combined_loss', action='store_true', help='Use combined triplet + arcface loss')
+    parser.add_argument('--disable_augmentation', action='store_true', 
+                       help='Disable data augmentation (use same transforms for train and val)')
+    parser.add_argument('--augmentation_strength', type=str, default='normal',
+                       choices=['light', 'normal', 'strong'],
+                       help='Augmentation strength: light (mild), normal (default), strong (aggressive)')
     
     args = parser.parse_args()
     
@@ -185,17 +190,89 @@ def main():
     device = torch.device(args.device)
     print(f'Using device: {device}')
     
-    # Create dataloaders
-    print('Loading datasets...')
-    train_loader, val_loader = create_dataloaders(
-        args.data_dir,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        use_dual_view=True
+    # ========================================================================
+    # STEP 1: CREATE IMAGE TRANSFORMS WITH AUGMENTATION
+    # ========================================================================
+    # Image augmentation is CRITICAL for preventing overfitting and improving
+    # model generalization. It artificially increases dataset size by creating
+    # variations of training images.
+    
+    print('Setting up image transforms and augmentation...')
+    
+    if args.disable_augmentation:
+        # If augmentation is disabled, use same transforms for both train and val
+        print('⚠️  WARNING: Data augmentation is DISABLED!')
+        print('   This may lead to overfitting, especially with small datasets.')
+        train_transform = get_val_transforms()  # Use validation transforms (no augmentation)
+        val_transform = get_val_transforms()
+    else:
+        # Training transforms with augmentation (applied to training images)
+        train_transform = get_train_transforms()
+        
+        # Validation transforms without augmentation (only normalization)
+        # We don't augment validation images to get consistent evaluation metrics
+        val_transform = get_val_transforms()
+        
+        # Print augmentation details for transparency
+        print('\n📸 Training Image Augmentation Applied:')
+        print('  ✅ Random Crop (256→224): Randomly crops 224x224 from 256x256')
+        print('     → Forces model to learn from different image regions')
+        print('  ✅ Random Horizontal Flip (50% chance): Flips image left-right')
+        print('     → Dogs can face either direction, model should handle both')
+        print('  ✅ Color Jitter: Random brightness, contrast, saturation, hue changes')
+        print('     → Handles different lighting conditions and camera settings')
+        print('  ✅ Random Rotation (±10 degrees): Slight rotation')
+        print('     → Handles slight camera angle variations')
+        print('  ✅ Normalization: ImageNet mean/std normalization')
+        print('     → Required for pretrained EfficientNet and ViT models')
+        print('\n📸 Validation: No augmentation (only resize + normalize)')
+        print('  → Ensures consistent evaluation metrics\n')
+    
+    # ========================================================================
+    # STEP 2: CREATE DATASETS WITH EXPLICIT TRANSFORMS
+    # ========================================================================
+    # Create datasets directly with our transforms to make augmentation explicit
+    print('Creating training and validation datasets...')
+    
+    train_dir = os.path.join(args.data_dir, 'train')
+    val_dir = os.path.join(args.data_dir, 'val')
+    
+    # Create training dataset WITH augmentation transforms
+    train_dataset = DualViewDataset(
+        train_dir,
+        transform=train_transform  # ← Augmentation applied here!
     )
     
-    print(f'Train samples: {len(train_loader.dataset)}')
-    print(f'Val samples: {len(val_loader.dataset)}')
+    # Create validation dataset WITHOUT augmentation (only normalization)
+    val_dataset = DualViewDataset(
+        val_dir,
+        transform=val_transform  # ← No augmentation, just normalization
+    )
+    
+    print(f'Train samples: {len(train_dataset)}')
+    print(f'Val samples: {len(val_dataset)}')
+    
+    # ========================================================================
+    # STEP 3: CREATE DATALOADERS
+    # ========================================================================
+    # DataLoaders handle batching, shuffling, and parallel data loading
+    print('Creating data loaders...')
+    
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,  # Shuffle training data for better learning
+        num_workers=args.num_workers,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,  # Don't shuffle validation (not needed)
+        num_workers=args.num_workers,
+        pin_memory=True if torch.cuda.is_available() else False
+    )
     
     # Create global label mapping (FIX: consistent labels across all batches)
     print('Creating label mapping...')
