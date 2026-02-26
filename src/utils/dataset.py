@@ -74,8 +74,14 @@ class DogDataset(Dataset):
             
             dog_id = dog_folder.name
             
-            # Find all images in this folder
-            images = list(dog_folder.glob('*.jpg')) + list(dog_folder.glob('*.png'))
+            # Find all images in this folder, using set to avoid duplicates
+            images = set()
+            images.update(dog_folder.glob('*.jpg'))
+            images.update(dog_folder.glob('*.jpeg'))
+            images.update(dog_folder.glob('*.JPEG'))
+            images.update(dog_folder.glob('*.png'))
+            images.update(dog_folder.glob('*.PNG'))
+            images = sorted(list(images))  # Convert to sorted list for consistent ordering
             
             for img_path in images:
                 # Determine view type from filename
@@ -133,25 +139,32 @@ class DogDataset(Dataset):
 class DualViewDataset(Dataset):
     """
     Dataset that pairs frontal and lateral views of the same dog.
+    Supports pre-augmented images for faster training.
     """
     
     def __init__(
         self,
         data_dir: str,
         transform=None,
-        allow_single_view: bool = True
+        allow_single_view: bool = True,
+        use_augmented: bool = False,
+        augmented_dir: str = None
     ):
         """
         Initialize dual-view dataset.
         
         Args:
             data_dir: Root directory containing dog folders
-            transform: Image transforms
+            transform: Image transforms (should only include normalization if use_augmented=True)
             allow_single_view: If True, use same image for both views if only one available
+            use_augmented: If True, use pre-augmented images from augmented_dir
+            augmented_dir: Directory containing pre-augmented images (if use_augmented=True)
         """
         self.data_dir = Path(data_dir)
         self.transform = transform
         self.allow_single_view = allow_single_view
+        self.use_augmented = use_augmented
+        self.augmented_dir = Path(augmented_dir) if augmented_dir else None
         
         # Load paired samples
         self.samples = self._load_paired_samples()
@@ -175,10 +188,21 @@ class DualViewDataset(Dataset):
             frontal_images = []
             lateral_images = []
             
-            images = list(dog_folder.glob('*.jpg')) + list(dog_folder.glob('*.png'))
+            # Collect all images, using set to avoid duplicates (Windows glob is case-insensitive)
+            images = set()
+            images.update(dog_folder.glob('*.jpg'))
+            images.update(dog_folder.glob('*.jpeg'))
+            images.update(dog_folder.glob('*.JPEG'))
+            images.update(dog_folder.glob('*.png'))
+            images.update(dog_folder.glob('*.PNG'))
+            images = sorted(list(images))  # Convert to sorted list for consistent ordering
             
             for img_path in images:
                 filename_lower = img_path.name.lower()
+                
+                # Skip augmented images when loading original paths
+                if '_aug' in img_path.stem:
+                    continue
                 
                 if 'front' in filename_lower or 'frontal' in filename_lower:
                     frontal_images.append(str(img_path))
@@ -191,11 +215,50 @@ class DualViewDataset(Dataset):
                 # This allows multiple samples per dog for better evaluation
                 for front_path in frontal_images:
                     for side_path in lateral_images:
-                        samples.append({
-                            'frontal_path': front_path,
-                            'lateral_path': side_path,
-                            'dog_id': dog_id
-                        })
+                        # If using augmented images, find all augmented versions
+                        if self.use_augmented and self.augmented_dir:
+                            # Find augmented versions of these images
+                            front_base = Path(front_path).stem
+                            side_base = Path(side_path).stem
+                            front_ext = Path(front_path).suffix
+                            side_ext = Path(side_path).suffix
+                            
+                            aug_dog_dir = self.augmented_dir / dog_id
+                            if aug_dog_dir.exists():
+                                # Find all augmented versions
+                                front_augmented = sorted(aug_dog_dir.glob(f"{front_base}_aug*{front_ext}"))
+                                side_augmented = sorted(aug_dog_dir.glob(f"{side_base}_aug*{side_ext}"))
+                                
+                                if front_augmented and side_augmented:
+                                    # Store base paths and augmented versions
+                                    samples.append({
+                                        'frontal_base': front_path,
+                                        'lateral_base': side_path,
+                                        'frontal_augmented': [str(p) for p in front_augmented],
+                                        'lateral_augmented': [str(p) for p in side_augmented],
+                                        'dog_id': dog_id
+                                    })
+                                else:
+                                    # Fallback to original if no augmented versions found
+                                    samples.append({
+                                        'frontal_path': front_path,
+                                        'lateral_path': side_path,
+                                        'dog_id': dog_id
+                                    })
+                            else:
+                                # Fallback to original if augmented dir doesn't exist
+                                samples.append({
+                                    'frontal_path': front_path,
+                                    'lateral_path': side_path,
+                                    'dog_id': dog_id
+                                })
+                        else:
+                            # Not using augmented images
+                            samples.append({
+                                'frontal_path': front_path,
+                                'lateral_path': side_path,
+                                'dog_id': dog_id
+                            })
             elif self.allow_single_view:
                 # Use same image for both views if only one type available
                 if frontal_images:
@@ -220,23 +283,34 @@ class DualViewDataset(Dataset):
     
     def __getitem__(self, idx: int) -> dict:
         """Get a paired sample."""
+        import random
         sample = self.samples[idx]
+        
+        # Load images (use augmented if available)
+        if self.use_augmented and 'frontal_augmented' in sample:
+            # Randomly select one augmented version
+            frontal_path = random.choice(sample['frontal_augmented'])
+            lateral_path = random.choice(sample['lateral_augmented'])
+        else:
+            # Use original paths
+            frontal_path = sample['frontal_path']
+            lateral_path = sample['lateral_path']
         
         # Load frontal image
         try:
-            frontal_img = Image.open(sample['frontal_path']).convert('RGB')
+            frontal_img = Image.open(frontal_path).convert('RGB')
         except Exception as e:
-            print(f"Error loading frontal image {sample['frontal_path']}: {e}")
+            print(f"Error loading frontal image {frontal_path}: {e}")
             frontal_img = Image.new('RGB', (224, 224), color='black')
         
         # Load lateral image
         try:
-            lateral_img = Image.open(sample['lateral_path']).convert('RGB')
+            lateral_img = Image.open(lateral_path).convert('RGB')
         except Exception as e:
-            print(f"Error loading lateral image {sample['lateral_path']}: {e}")
+            print(f"Error loading lateral image {lateral_path}: {e}")
             lateral_img = Image.new('RGB', (224, 224), color='black')
         
-        # Apply transforms
+        # Apply transforms (should only be normalization if using augmented images)
         if self.transform:
             frontal_img = self.transform(frontal_img)
             lateral_img = self.transform(lateral_img)
@@ -245,8 +319,8 @@ class DualViewDataset(Dataset):
             'frontal': frontal_img,
             'lateral': lateral_img,
             'dog_id': sample['dog_id'],
-            'frontal_path': sample['frontal_path'],
-            'lateral_path': sample['lateral_path']
+            'frontal_path': frontal_path,
+            'lateral_path': lateral_path
         }
 
 
@@ -289,12 +363,14 @@ class TripletDataset(Dataset):
                 continue
             
             dog_id = dog_folder.name
-            images = []
-            
-            for img_path in dog_folder.glob('*.jpg'):
-                images.append(str(img_path))
-            for img_path in dog_folder.glob('*.png'):
-                images.append(str(img_path))
+            # Collect all images, using set to avoid duplicates
+            images_set = set()
+            images_set.update(dog_folder.glob('*.jpg'))
+            images_set.update(dog_folder.glob('*.jpeg'))
+            images_set.update(dog_folder.glob('*.JPEG'))
+            images_set.update(dog_folder.glob('*.png'))
+            images_set.update(dog_folder.glob('*.PNG'))
+            images = [str(img_path) for img_path in sorted(images_set)]
             
             if images:
                 dog_images[dog_id] = images

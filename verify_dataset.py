@@ -69,15 +69,33 @@ def verify_dataset(data_dir='data'):
     test_count = 0
     
     for dog_id in train_dogs:
-        train_imgs = list((train_dir / dog_id).glob("*.jpg")) + list((train_dir / dog_id).glob("*.jpeg")) + list((train_dir / dog_id).glob("*.JPEG")) + list((train_dir / dog_id).glob("*.png"))
+        # Use set to avoid duplicates (Windows glob is case-insensitive)
+        train_imgs = set()
+        train_imgs.update((train_dir / dog_id).glob("*.jpg"))
+        train_imgs.update((train_dir / dog_id).glob("*.jpeg"))
+        train_imgs.update((train_dir / dog_id).glob("*.JPEG"))
+        train_imgs.update((train_dir / dog_id).glob("*.png"))
+        train_imgs.update((train_dir / dog_id).glob("*.PNG"))
         train_count += len(train_imgs)
     
     for dog_id in val_dogs:
-        val_imgs = list((val_dir / dog_id).glob("*.jpg")) + list((val_dir / dog_id).glob("*.jpeg")) + list((val_dir / dog_id).glob("*.JPEG")) + list((val_dir / dog_id).glob("*.png"))
+        # Use set to avoid duplicates (Windows glob is case-insensitive)
+        val_imgs = set()
+        val_imgs.update((val_dir / dog_id).glob("*.jpg"))
+        val_imgs.update((val_dir / dog_id).glob("*.jpeg"))
+        val_imgs.update((val_dir / dog_id).glob("*.JPEG"))
+        val_imgs.update((val_dir / dog_id).glob("*.png"))
+        val_imgs.update((val_dir / dog_id).glob("*.PNG"))
         val_count += len(val_imgs)
     
     for dog_id in test_dogs:
-        test_imgs = list((test_dir / dog_id).glob("*.jpg")) + list((test_dir / dog_id).glob("*.jpeg")) + list((test_dir / dog_id).glob("*.JPEG")) + list((test_dir / dog_id).glob("*.png"))
+        # Use set to avoid duplicates (Windows glob is case-insensitive)
+        test_imgs = set()
+        test_imgs.update((test_dir / dog_id).glob("*.jpg"))
+        test_imgs.update((test_dir / dog_id).glob("*.jpeg"))
+        test_imgs.update((test_dir / dog_id).glob("*.JPEG"))
+        test_imgs.update((test_dir / dog_id).glob("*.png"))
+        test_imgs.update((test_dir / dog_id).glob("*.PNG"))
         test_count += len(test_imgs)
     
     print(f"  Train images: {train_count}")

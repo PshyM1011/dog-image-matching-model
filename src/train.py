@@ -21,6 +21,12 @@ from src.model import DualViewFusionModel, CombinedLoss, HardTripletLoss
 from src.utils import DualViewDataset
 from src.preprocessing import get_train_transforms, get_val_transforms
 
+# Import augmented dataset generator
+try:
+    from src.utils.generate_augmented_dataset import generate_augmented_images
+except ImportError:
+    generate_augmented_images = None
+
 
 def train_epoch(
     model: nn.Module,
@@ -180,6 +186,14 @@ def main():
     parser.add_argument('--augmentation_strength', type=str, default='normal',
                        choices=['light', 'normal', 'strong'],
                        help='Augmentation strength: light (mild), normal (default), strong (aggressive)')
+    parser.add_argument('--use_pre_augmented', action='store_true',
+                       help='Use pre-augmented images from disk (faster training)')
+    parser.add_argument('--augmented_dir', type=str, default='data/train_augmented',
+                       help='Directory containing pre-augmented images')
+    parser.add_argument('--num_augmentations', type=int, default=5,
+                       help='Number of augmented versions per image (if generating)')
+    parser.add_argument('--force_regenerate_aug', action='store_true',
+                       help='Force regeneration of augmented images even if dataset unchanged')
     
     args = parser.parse_args()
     
@@ -191,6 +205,36 @@ def main():
     print(f'Using device: {device}')
     
     # ========================================================================
+    # STEP 0: GENERATE AUGMENTED IMAGES IF REQUESTED
+    # ========================================================================
+    train_dir = os.path.join(args.data_dir, 'train')
+    
+    if args.use_pre_augmented:
+        if generate_augmented_images is None:
+            print('⚠️  Warning: generate_augmented_images not available')
+            print('   Falling back to on-the-fly augmentation')
+            args.use_pre_augmented = False
+        else:
+            print('\n' + '='*70)
+            print('PRE-AUGMENTED IMAGES MODE')
+            print('='*70)
+            print(f'Checking for augmented images in: {args.augmented_dir}')
+            
+            # Generate augmented images if needed
+            try:
+                generate_augmented_images(
+                    source_dir=train_dir,
+                    output_dir=args.augmented_dir,
+                    num_augmentations=args.num_augmentations,
+                    force_regenerate=args.force_regenerate_aug
+                )
+                print('✓ Using pre-augmented images (faster training, no augmentation during training)')
+            except Exception as e:
+                print(f'⚠️  Error generating augmented images: {e}')
+                print('   Falling back to on-the-fly augmentation')
+                args.use_pre_augmented = False
+    
+    # ========================================================================
     # STEP 1: CREATE IMAGE TRANSFORMS WITH AUGMENTATION
     # ========================================================================
     # Image augmentation is CRITICAL for preventing overfitting and improving
@@ -199,14 +243,19 @@ def main():
     
     print('Setting up image transforms and augmentation...')
     
-    if args.disable_augmentation:
+    if args.use_pre_augmented:
+        # If using pre-augmented images, only apply normalization (no augmentation)
+        print('Using pre-augmented images - only applying normalization transforms')
+        train_transform = get_val_transforms()  # Only normalization, no augmentation
+        val_transform = get_val_transforms()
+    elif args.disable_augmentation:
         # If augmentation is disabled, use same transforms for both train and val
         print('⚠️  WARNING: Data augmentation is DISABLED!')
         print('   This may lead to overfitting, especially with small datasets.')
         train_transform = get_val_transforms()  # Use validation transforms (no augmentation)
         val_transform = get_val_transforms()
     else:
-        # Training transforms with augmentation (applied to training images)
+        # Training transforms with augmentation (applied to training images on-the-fly)
         train_transform = get_train_transforms()
         
         # Validation transforms without augmentation (only normalization)
@@ -214,7 +263,7 @@ def main():
         val_transform = get_val_transforms()
         
         # Print augmentation details for transparency
-        print('\n📸 Training Image Augmentation Applied:')
+        print('\n📸 Training Image Augmentation Applied (on-the-fly):')
         print('  ✅ Random Crop (256→224): Randomly crops 224x224 from 256x256')
         print('     → Forces model to learn from different image regions')
         print('  ✅ Random Horizontal Flip (50% chance): Flips image left-right')
@@ -234,14 +283,25 @@ def main():
     # Create datasets directly with our transforms to make augmentation explicit
     print('Creating training and validation datasets...')
     
-    train_dir = os.path.join(args.data_dir, 'train')
     val_dir = os.path.join(args.data_dir, 'val')
     
-    # Create training dataset WITH augmentation transforms
-    train_dataset = DualViewDataset(
-        train_dir,
-        transform=train_transform  # ← Augmentation applied here!
-    )
+    # Create training dataset
+    if args.use_pre_augmented:
+        # Use pre-augmented images (transform only normalizes)
+        train_dataset = DualViewDataset(
+            train_dir,
+            transform=train_transform,
+            use_augmented=True,
+            augmented_dir=args.augmented_dir
+        )
+        print(f'  Using pre-augmented images from: {args.augmented_dir}')
+    else:
+        # Use original images with on-the-fly augmentation
+        train_dataset = DualViewDataset(
+            train_dir,
+            transform=train_transform  # ← Augmentation applied here!
+        )
+        print('  Using original images with on-the-fly augmentation')
     
     # Create validation dataset WITHOUT augmentation (only normalization)
     val_dataset = DualViewDataset(
